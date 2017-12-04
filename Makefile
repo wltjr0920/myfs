@@ -1,5 +1,5 @@
 all:
-	gcc -o myfs fusexmp.c -lfuse -D_FILE_OFFSET_BITS=64
+	gcc -Wall fusexmp.c `pkg-config fuse --cflags --libs` -o myfs
 
 clean:
 	rm ./myfs

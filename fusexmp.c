@@ -8,7 +8,7 @@
 
   gcc -Wall fusexmp.c `pkg-config fuse --cflags --libs` -o fusexmp
 */
-
+#define STRIPE 4
 #define FUSE_USE_VERSION 26
 
 #ifdef HAVE_CONFIG_H
@@ -55,16 +55,21 @@ static struct {
 
 static int xmp_getattr(const char *path, struct stat *stbuf)
 {
-  char fullpath[PATH_MAX];
+  char fullpaths[2][PATH_MAX];
+  struct stat sum;
 	int res;
 
-  sprintf(fullpath, "%s%s",
-      rand() % 2 == 0 ? global_context.driveA : global_context.driveB, path);
+ sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
+ sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
 
-	res = lstat(fullpath, stbuf);
+	res = lstat(fullpaths[0], stbuf);
 	if (res == -1)
 		return -errno;
-
+  res = lstat(fullpaths[1], &sum);
+	if (res == -1)
+		return -errno;
+  
+  stbuf->st_size+=sum.st_size;
 	return 0;
 }
 
@@ -104,7 +109,7 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fi)
 {
-  char fullpath[PATH_MAX];
+  char fullpaths[2][PATH_MAX];
 
 	DIR *dp;
 	struct dirent *de;
@@ -112,10 +117,10 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	(void) offset;
 	(void) fi;
 
-  sprintf(fullpath, "%s%s",
-      rand() % 2 == 0 ? global_context.driveA : global_context.driveB, path);
+  sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
+  sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
 
-	dp = opendir(fullpath);
+	dp = opendir(fullpaths[0]);
 	if (dp == NULL)
 		return -errno;
 
@@ -353,16 +358,18 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
-  char fullpath[PATH_MAX];
+  char fullpaths[2][PATH_MAX];
   int res;
+  struct fuse_file_info file2;
+  sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
+  sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
 
-  sprintf(fullpath, "%s%s",
-      rand() % 2 == 0 ? global_context.driveA : global_context.driveB, path);
-
-  res = open(fullpath, fi->flags);
+  res = open(fullpaths[0], fi->flags);
   if (res == -1)
     return -errno;
-
+    res = open(fullpaths[1], (&file2)->flags);
+  if (res == -1)
+    return -errno;
   close(res);
   return 0;
 }
@@ -370,65 +377,104 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
     struct fuse_file_info *fi)
 {
-  char fullpath[PATH_MAX];
+  char fullpaths[2][PATH_MAX];
   int fd;
   int res;
+  int i=0;
+  off_t block=offset/STRIPE;
 
-  sprintf(fullpath, "%s%s",
-      rand() % 2 == 0 ? global_context.driveA : global_context.driveB, path);
+fprintf(stdout,"size : %ld\n",size);
+  
+  sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
+  sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
   (void) fi;
-  fd = open(fullpath, O_RDONLY);
-  if (fd == -1)
-    return -errno;
+  while(i<(size/STRIPE)){
+    fd = open(fullpaths[i%2], O_RDONLY);
+    if (fd == -1)
+      return -errno;
 
-  res = pread(fd, buf, size, offset);
-  if (res == -1)
-    res = -errno;
-
-  close(fd);
+    res = pread(fd, buf, STRIPE, block/2*STRIPE);
+    if (res == -1)
+      res = -errno;
+fprintf(stdout,"fullpaths : %s\n",fullpaths[i%2]);
+fprintf(stdout,"i : %d\n",i);
+fprintf(stdout,"size : %ld\n",size);
+fprintf(stdout,"offset : %ld\n",offset);
+fprintf(stdout,"buf : %s\n",buf);
+fprintf(stdout,"size/STRIPE : %ld\n\n\n",size/STRIPE);
+    close(fd);
+    i++;
+  }
   return res;
 }
 
 static int xmp_write(const char *path, const char *buf, size_t size,
-    off_t offset, struct fuse_file_info *fi)
+off_t offset, struct fuse_file_info *fi)
 {
   char fullpaths[2][PATH_MAX];
   int fd;
-  int res;
-
+  int res = 0;
   (void) fi;
-
+  // char *temp=(char*)malloc(strlen(buf));
   sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
   sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
 
-  for (int i = 0; i < 2; ++i) {
-    const char* fullpath = fullpaths[i];
+// strncpy(temp,buf,size);
+  off_t block=offset/STRIPE;
 
-    fd = open(fullpath, O_WRONLY);
+    fd = open(fullpaths[block%2], O_WRONLY);//open file by offset/stripe
     if (fd == -1)
       return -errno;
-
-    res = pwrite(fd, buf, size, offset);
+if(STRIPE<size){
+ res = pwrite(fd, buf, STRIPE, block/2*STRIPE-block*STRIPE+offset);
     if (res == -1)
       res = -errno;
-
     close(fd);
-  }
-
-  return res;
+    // int ptr = strchr(buf,'\n');
+    // while(ptr<strlen(buf)){
+    //   memset(temp[ptr],0,STRIPE);
+    //   strcpy(temp[ptr],'');
+    //   ptr++;
+    // // }
+    //    fprintf(stdout, "STRIPE<size*******");
+    //    fprintf(stdout, "path : %s     \n",fullpaths[block%2]);
+    //     fprintf(stdout, "buf : %s     \n",buf);
+    //     fprintf(stdout, "size : %ld     ",size);
+    //     fprintf(stdout, "block : %ld     \n\n",block);
+}else{
+  res = pwrite(fd, buf, size, block/2*STRIPE-block*STRIPE+offset);
+    if (res == -1)
+      res = -errno;
+    close(fd);
+    // int ptr = strchr(buf,'\n');
+    // while(ptr<strlen(buf)){
+    //   memset(temp[ptr],0,STRIPE);
+    //   ptr++;
+    // }
+      //  fprintf(stdout, "STRIPE>=size*******");
+      //   fprintf(stdout, "path : %s     \n",fullpaths[block%2]);
+      //   fprintf(stdout, "buf : %s     \n",buf);
+      //   fprintf(stdout, "size : %ld     ",size);
+      //   fprintf(stdout, "block : %ld     \n\n",block);
 }
 
+ return res;
+}
 static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
-  char fullpath[PATH_MAX];
+  char fullpaths[2][PATH_MAX];
   int res;
+  struct statvfs sum;
 
-  sprintf(fullpath, "%s%s",
-      rand() % 2 == 0 ? global_context.driveA : global_context.driveB, path);
-  res = statvfs(fullpath, stbuf);
+  
+  sprintf(fullpaths[0], "%s%s", global_context.driveA, path);
+  sprintf(fullpaths[1], "%s%s", global_context.driveB, path);
+  res = statvfs(fullpaths[0], stbuf);
   if (res == -1)
     return -errno;
-
+     res = statvfs(fullpaths[1], &sum);
+  if (res == -1)
+    return -errno;
   return 0;
 }
 
@@ -592,8 +638,8 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  strcpy(global_context.driveA, argv[--argc]);
   strcpy(global_context.driveB, argv[--argc]);
+  strcpy(global_context.driveA, argv[--argc]);
 
   srand(time(NULL));
 
